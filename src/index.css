@@ -22,6 +22,7 @@
   --success-foreground: hsl(210 40% 98%);
   --warning: hsl(38 92% 50%);
   --warning-foreground: hsl(210 40% 98%);
+  --radius: 0.5rem;
 }
 
 .dark {

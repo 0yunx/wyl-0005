@@ -316,4 +316,4 @@ src/
 - **构建工具**: Vite 7
 - **样式**: Tailwind CSS v4
 - **渲染**: HTML5 Canvas API
-- **协同通信**: BroadcastChannel API
+- **协同通信**: BroadcastChannel API（主通道）+ localStorage storage 事件（Fallback）

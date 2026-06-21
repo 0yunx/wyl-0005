@@ -174,7 +174,8 @@ export class CollaborationManager {
     }
     try {
       localStorage.removeItem(STORAGE_KEY);
-    } catch (_) {
+    } catch {
+      void 0;
     }
     this.processedNonces.clear();
     this.peers.clear();
@@ -216,7 +217,8 @@ export class CollaborationManager {
       }
 
       this.processIncomingMessage(envelope.message);
-    } catch (_) {
+    } catch {
+      void 0;
     }
   }
 
@@ -283,8 +285,6 @@ export class CollaborationManager {
     if (hasContent) {
       this.sendStateSync(message.senderId);
     }
-
-    this.sendStateRequestTo(message.senderId);
   }
 
   private handleCommandAdd(message: CommandAddMessage): void {
@@ -395,7 +395,7 @@ export class CollaborationManager {
       }
     }
 
-    if (this.activeTransport === 'storage' || !this.broadcastChannel) {
+    if (this.storageHandler) {
       try {
         const nonce = this.generateNonce();
         this.processedNonces.add(nonce);
@@ -466,42 +466,6 @@ export class CollaborationManager {
     this.send(baseMessage);
   }
 
-  private sendStateRequestTo(_targetId: string): void {
-    this.version++;
-    this.lastSentTimestamp = Date.now();
-
-    const message: StateRequestMessage = {
-      type: 'state-request',
-      senderId: this.clientId,
-      version: this.version,
-      timestamp: Date.now(),
-      requesterId: this.clientId,
-    };
-
-    if (this.broadcastChannel) {
-      try {
-        this.broadcastChannel.postMessage(message);
-      } catch (error) {
-        console.error('BroadcastChannel send failed:', error);
-      }
-    }
-
-    if (this.activeTransport === 'storage' || !this.broadcastChannel) {
-      try {
-        const nonce = this.generateNonce();
-        this.processedNonces.add(nonce);
-        const envelope: StorageEnvelope = {
-          message,
-          nonce,
-          expireAt: Date.now() + STORAGE_MESSAGE_TTL,
-        };
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
-      } catch (error) {
-        console.error('localStorage send failed:', error);
-      }
-    }
-  }
-
   private sendStateSync(targetId: string): void {
     const { commands, currentIndex } = this.callbacks.getState();
 
@@ -526,7 +490,7 @@ export class CollaborationManager {
       }
     }
 
-    if (this.activeTransport === 'storage' || !this.broadcastChannel) {
+    if (this.storageHandler) {
       try {
         const nonce = this.generateNonce();
         this.processedNonces.add(nonce);
@@ -543,7 +507,13 @@ export class CollaborationManager {
   }
 
   private updatePeerLastSeen(peerId: string): void {
+    const hadPeers = this.peers.size > 0;
     this.peers.set(peerId, Date.now());
+
+    if (!hadPeers && this.peers.size > 0 && this.connectionStatus === 'disconnected') {
+      this.updateConnectionStatus('connected');
+    }
+
     this.notifyStateChange();
   }
 

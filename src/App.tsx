@@ -19,6 +19,8 @@ function App() {
   const [peers, setPeers] = useState<PeerInfo[]>([]);
   const [syncLatency, setSyncLatency] = useState(0);
   const [syncVersion, setSyncVersion] = useState(0);
+  const [syncTransport, setSyncTransport] = useState<'broadcast' | 'storage' | 'none'>('none');
+  const [syncOrigin, setSyncOrigin] = useState('');
 
   const collabManagerRef = useRef<CollaborationManager | null>(null);
   const commandsRef = useRef<Command[]>([]);
@@ -83,6 +85,8 @@ function App() {
         setPeers(state.peers);
         setSyncLatency(state.syncLatency);
         setSyncVersion(state.version);
+        setSyncTransport(state.transport);
+        setSyncOrigin(state.origin);
       },
       getState: () => ({
         commands: commandsRef.current,
@@ -194,6 +198,8 @@ function App() {
         peers={peers}
         syncLatency={syncLatency}
         syncVersion={syncVersion}
+        syncTransport={syncTransport}
+        syncOrigin={syncOrigin}
       />
       <div className="flex flex-1 overflow-hidden">
         <div className="w-80 border-r border-border flex flex-col bg-card">

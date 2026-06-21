@@ -9,18 +9,24 @@ import type {
   ClearMessage,
   RollbackMessage,
   StateSyncMessage,
+  StateRequestMessage,
 } from './types';
 
 const CHANNEL_NAME = 'ai-canvas-collaboration';
+const STORAGE_KEY = 'ai-canvas-collab-storage';
 const HEARTBEAT_INTERVAL = 2000;
 const PEER_TIMEOUT = 5000;
-const STATE_REQUEST_DELAY = 500;
+const STATE_REQUEST_DELAY = 300;
+const STORAGE_MESSAGE_TTL = 2000;
+const INITIAL_SYNC_WINDOW = 3000;
 
 export interface CollaborationState {
   connectionStatus: ConnectionStatus;
   peers: PeerInfo[];
   version: number;
   syncLatency: number;
+  transport: 'broadcast' | 'storage' | 'none';
+  origin: string;
 }
 
 export interface CollaborationCallbacks {
@@ -34,8 +40,19 @@ export interface CollaborationCallbacks {
   getState: () => { commands: Command[]; currentIndex: number };
 }
 
+type TransportType = 'broadcast' | 'storage';
+
+interface StorageEnvelope {
+  message: SyncMessage;
+  nonce: string;
+  expireAt: number;
+}
+
 export class CollaborationManager {
-  private channel: BroadcastChannel | null = null;
+  private broadcastChannel: BroadcastChannel | null = null;
+  private storageHandler: ((e: StorageEvent) => void) | null = null;
+  private processedNonces: Set<string> = new Set();
+
   private clientId: string;
   private callbacks: CollaborationCallbacks;
   private version: number = 0;
@@ -43,10 +60,13 @@ export class CollaborationManager {
   private heartbeatTimer: number | null = null;
   private peerCheckTimer: number | null = null;
   private stateRequestTimer: number | null = null;
+  private initialSyncTimer: number | null = null;
   private connectionStatus: ConnectionStatus = 'disconnected';
   private syncLatency: number = 0;
   private lastSentTimestamp: number = 0;
-  private isSyncing: boolean = false;
+  private isAwaitingInitialSync: boolean = false;
+  private activeTransport: TransportType | null = null;
+  private connectedAt: number = 0;
 
   constructor(callbacks: CollaborationCallbacks) {
     this.clientId = this.generateClientId();
@@ -57,37 +77,74 @@ export class CollaborationManager {
     return `${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 10)}`;
   }
 
+  private generateNonce(): string {
+    return `${this.clientId}-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
+  }
+
   getClientId(): string {
     return this.clientId;
   }
 
   connect(): void {
-    if (this.channel) {
+    if (this.broadcastChannel || this.storageHandler) {
       return;
     }
 
+    let transportConnected = false;
+
     try {
-      this.channel = new BroadcastChannel(CHANNEL_NAME);
-      this.channel.onmessage = this.handleMessage.bind(this);
-      this.channel.onmessageerror = this.handleMessageError.bind(this);
-
-      this.sendHello();
-
-      this.scheduleStateRequest();
-
-      this.heartbeatTimer = window.setInterval(() => {
-        this.sendHeartbeat();
-      }, HEARTBEAT_INTERVAL);
-
-      this.peerCheckTimer = window.setInterval(() => {
-        this.checkPeerTimeouts();
-      }, PEER_TIMEOUT);
-
-      this.updateConnectionStatus('syncing');
+      this.broadcastChannel = new BroadcastChannel(CHANNEL_NAME);
+      this.broadcastChannel.onmessage = this.handleMessage.bind(this);
+      this.broadcastChannel.onmessageerror = this.handleMessageError.bind(this);
+      this.activeTransport = 'broadcast';
+      transportConnected = true;
     } catch (error) {
-      console.error('Failed to create BroadcastChannel:', error);
-      this.updateConnectionStatus('disconnected');
+      console.warn('BroadcastChannel unavailable, falling back to localStorage:', error);
     }
+
+    try {
+      this.storageHandler = this.handleStorageEvent.bind(this);
+      window.addEventListener('storage', this.storageHandler);
+      if (!transportConnected) {
+        this.activeTransport = 'storage';
+        transportConnected = true;
+      }
+    } catch (error) {
+      console.error('Failed to setup localStorage fallback:', error);
+    }
+
+    if (!transportConnected) {
+      this.activeTransport = null;
+      this.updateConnectionStatus('disconnected');
+      return;
+    }
+
+    this.isAwaitingInitialSync = true;
+    this.connectedAt = Date.now();
+    this.updateConnectionStatus('syncing');
+
+    this.sendHello();
+
+    this.scheduleStateRequest();
+
+    this.initialSyncTimer = window.setTimeout(() => {
+      if (this.isAwaitingInitialSync) {
+        this.isAwaitingInitialSync = false;
+        if (this.peers.size > 0) {
+          this.updateConnectionStatus('connected');
+        } else {
+          this.updateConnectionStatus('disconnected');
+        }
+      }
+    }, INITIAL_SYNC_WINDOW);
+
+    this.heartbeatTimer = window.setInterval(() => {
+      this.sendHeartbeat();
+    }, HEARTBEAT_INTERVAL);
+
+    this.peerCheckTimer = window.setInterval(() => {
+      this.checkPeerTimeouts();
+    }, PEER_TIMEOUT);
   }
 
   disconnect(): void {
@@ -103,11 +160,26 @@ export class CollaborationManager {
       clearTimeout(this.stateRequestTimer);
       this.stateRequestTimer = null;
     }
-    if (this.channel) {
-      this.channel.close();
-      this.channel = null;
+    if (this.initialSyncTimer) {
+      clearTimeout(this.initialSyncTimer);
+      this.initialSyncTimer = null;
     }
+    if (this.broadcastChannel) {
+      this.broadcastChannel.close();
+      this.broadcastChannel = null;
+    }
+    if (this.storageHandler) {
+      window.removeEventListener('storage', this.storageHandler);
+      this.storageHandler = null;
+    }
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch (_) {
+    }
+    this.processedNonces.clear();
     this.peers.clear();
+    this.activeTransport = null;
+    this.isAwaitingInitialSync = false;
     this.updateConnectionStatus('disconnected');
   }
 
@@ -120,9 +192,39 @@ export class CollaborationManager {
     }, STATE_REQUEST_DELAY);
   }
 
-  private handleMessage(event: MessageEvent<SyncMessage>): void {
-    const message = event.data;
+  private handleStorageEvent(event: StorageEvent): void {
+    if (event.key !== STORAGE_KEY || !event.newValue) {
+      return;
+    }
 
+    try {
+      const envelope: StorageEnvelope = JSON.parse(event.newValue);
+      if (!envelope || !envelope.message || !envelope.nonce) {
+        return;
+      }
+      if (Date.now() > envelope.expireAt) {
+        return;
+      }
+      if (this.processedNonces.has(envelope.nonce)) {
+        return;
+      }
+      this.processedNonces.add(envelope.nonce);
+
+      if (this.processedNonces.size > 1000) {
+        const arr = Array.from(this.processedNonces);
+        this.processedNonces = new Set(arr.slice(arr.length - 500));
+      }
+
+      this.processIncomingMessage(envelope.message);
+    } catch (_) {
+    }
+  }
+
+  private handleMessage(event: MessageEvent<SyncMessage>): void {
+    this.processIncomingMessage(event.data);
+  }
+
+  private processIncomingMessage(message: SyncMessage): void {
     if (!message || !message.type || !message.senderId) {
       return;
     }
@@ -134,7 +236,7 @@ export class CollaborationManager {
     this.updatePeerLastSeen(message.senderId);
 
     if (message.version > this.version + 1 && message.type !== 'state-sync') {
-      this.isSyncing = true;
+      this.isAwaitingInitialSync = true;
       this.updateConnectionStatus('syncing');
       this.sendStateRequest();
       return;
@@ -175,6 +277,13 @@ export class CollaborationManager {
   }
 
   private handleHello(message: SyncMessage): void {
+    const { commands } = this.callbacks.getState();
+    const hasContent = commands.length > 0;
+
+    if (hasContent) {
+      this.sendStateSync(message.senderId);
+    }
+
     this.sendStateRequestTo(message.senderId);
   }
 
@@ -184,7 +293,7 @@ export class CollaborationManager {
       this.version = message.version;
       this.callbacks.onCommandAdd(message.command, message.newCurrentIndex, true);
     }
-    this.completeSyncing();
+    this.tryCompleteInitialSync();
   }
 
   private handleUndo(message: UndoMessage): void {
@@ -193,7 +302,7 @@ export class CollaborationManager {
       this.version = message.version;
       this.callbacks.onUndo(message.newCurrentIndex, true);
     }
-    this.completeSyncing();
+    this.tryCompleteInitialSync();
   }
 
   private handleRedo(message: RedoMessage): void {
@@ -202,7 +311,7 @@ export class CollaborationManager {
       this.version = message.version;
       this.callbacks.onRedo(message.newCurrentIndex, true);
     }
-    this.completeSyncing();
+    this.tryCompleteInitialSync();
   }
 
   private handleClear(message: ClearMessage): void {
@@ -211,7 +320,7 @@ export class CollaborationManager {
       this.version = message.version;
       this.callbacks.onClear(true);
     }
-    this.completeSyncing();
+    this.tryCompleteInitialSync();
   }
 
   private handleRollback(message: RollbackMessage): void {
@@ -220,13 +329,11 @@ export class CollaborationManager {
       this.version = message.version;
       this.callbacks.onRollback(message.newCurrentIndex, true);
     }
-    this.completeSyncing();
+    this.tryCompleteInitialSync();
   }
 
-  private handleStateRequest(message: SyncMessage): void {
-    if ('requesterId' in message) {
-      this.sendStateSync(message.requesterId);
-    }
+  private handleStateRequest(message: StateRequestMessage): void {
+    this.sendStateSync(message.requesterId);
   }
 
   private handleStateSync(message: StateSyncMessage): void {
@@ -237,13 +344,25 @@ export class CollaborationManager {
     this.measureLatency(message.timestamp);
     this.version = message.version;
     this.callbacks.onStateSync(message.commands, message.currentIndex);
-    this.completeSyncing();
+
+    this.isAwaitingInitialSync = false;
+    if (this.initialSyncTimer) {
+      clearTimeout(this.initialSyncTimer);
+      this.initialSyncTimer = null;
+    }
+    this.updateConnectionStatus('connected');
   }
 
-  private completeSyncing(): void {
-    this.isSyncing = false;
-    if (this.peers.size > 0) {
-      this.updateConnectionStatus('connected');
+  private tryCompleteInitialSync(): void {
+    if (this.isAwaitingInitialSync && Date.now() - this.connectedAt > 500) {
+      this.isAwaitingInitialSync = false;
+      if (this.initialSyncTimer) {
+        clearTimeout(this.initialSyncTimer);
+        this.initialSyncTimer = null;
+      }
+      if (this.peers.size > 0) {
+        this.updateConnectionStatus('connected');
+      }
     }
   }
 
@@ -258,10 +377,6 @@ export class CollaborationManager {
   }
 
   private send(message: Omit<SyncMessage, 'senderId' | 'version' | 'timestamp'>): void {
-    if (!this.channel) {
-      return;
-    }
-
     this.version++;
     this.lastSentTimestamp = Date.now();
 
@@ -272,7 +387,28 @@ export class CollaborationManager {
       timestamp: Date.now(),
     } as SyncMessage;
 
-    this.channel.postMessage(fullMessage);
+    if (this.broadcastChannel) {
+      try {
+        this.broadcastChannel.postMessage(fullMessage);
+      } catch (error) {
+        console.error('BroadcastChannel send failed:', error);
+      }
+    }
+
+    if (this.activeTransport === 'storage' || !this.broadcastChannel) {
+      try {
+        const nonce = this.generateNonce();
+        this.processedNonces.add(nonce);
+        const envelope: StorageEnvelope = {
+          message: fullMessage,
+          nonce,
+          expireAt: Date.now() + STORAGE_MESSAGE_TTL,
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+      } catch (error) {
+        console.error('localStorage send failed:', error);
+      }
+    }
   }
 
   sendCommandAdd(command: Command, newCurrentIndex: number): void {
@@ -323,41 +459,50 @@ export class CollaborationManager {
   }
 
   private sendStateRequest(): void {
-    if (!this.channel) return;
+    const baseMessage = {
+      type: 'state-request' as const,
+      requesterId: this.clientId,
+    };
+    this.send(baseMessage);
+  }
 
+  private sendStateRequestTo(_targetId: string): void {
     this.version++;
     this.lastSentTimestamp = Date.now();
 
-    const message: SyncMessage = {
+    const message: StateRequestMessage = {
       type: 'state-request',
       senderId: this.clientId,
       version: this.version,
       timestamp: Date.now(),
       requesterId: this.clientId,
-    } as SyncMessage;
+    };
 
-    this.channel.postMessage(message);
-  }
+    if (this.broadcastChannel) {
+      try {
+        this.broadcastChannel.postMessage(message);
+      } catch (error) {
+        console.error('BroadcastChannel send failed:', error);
+      }
+    }
 
-  private sendStateRequestTo(targetId: string): void {
-    if (!this.channel) return;
-
-    this.version++;
-
-    const message: SyncMessage = {
-      type: 'state-request',
-      senderId: this.clientId,
-      version: this.version,
-      timestamp: Date.now(),
-      requesterId: targetId,
-    } as SyncMessage;
-
-    this.channel.postMessage(message);
+    if (this.activeTransport === 'storage' || !this.broadcastChannel) {
+      try {
+        const nonce = this.generateNonce();
+        this.processedNonces.add(nonce);
+        const envelope: StorageEnvelope = {
+          message,
+          nonce,
+          expireAt: Date.now() + STORAGE_MESSAGE_TTL,
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+      } catch (error) {
+        console.error('localStorage send failed:', error);
+      }
+    }
   }
 
   private sendStateSync(targetId: string): void {
-    if (!this.channel) return;
-
     const { commands, currentIndex } = this.callbacks.getState();
 
     this.version++;
@@ -373,14 +518,32 @@ export class CollaborationManager {
       currentIndex,
     };
 
-    this.channel.postMessage(message);
+    if (this.broadcastChannel) {
+      try {
+        this.broadcastChannel.postMessage(message);
+      } catch (error) {
+        console.error('BroadcastChannel send failed:', error);
+      }
+    }
+
+    if (this.activeTransport === 'storage' || !this.broadcastChannel) {
+      try {
+        const nonce = this.generateNonce();
+        this.processedNonces.add(nonce);
+        const envelope: StorageEnvelope = {
+          message,
+          nonce,
+          expireAt: Date.now() + STORAGE_MESSAGE_TTL,
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+      } catch (error) {
+        console.error('localStorage send failed:', error);
+      }
+    }
   }
 
   private updatePeerLastSeen(peerId: string): void {
     this.peers.set(peerId, Date.now());
-    if (!this.isSyncing && this.connectionStatus !== 'connected') {
-      this.updateConnectionStatus('connected');
-    }
     this.notifyStateChange();
   }
 
@@ -396,7 +559,7 @@ export class CollaborationManager {
     }
 
     if (changed) {
-      if (this.peers.size === 0 && !this.isSyncing) {
+      if (this.peers.size === 0 && !this.isAwaitingInitialSync) {
         this.updateConnectionStatus('disconnected');
       }
       this.notifyStateChange();
@@ -419,6 +582,8 @@ export class CollaborationManager {
       })),
       version: this.version,
       syncLatency: this.syncLatency,
+      transport: this.activeTransport ?? 'none',
+      origin: typeof window !== 'undefined' ? window.location.origin : '',
     });
   }
 
@@ -431,6 +596,8 @@ export class CollaborationManager {
       })),
       version: this.version,
       syncLatency: this.syncLatency,
+      transport: this.activeTransport ?? 'none',
+      origin: typeof window !== 'undefined' ? window.location.origin : '',
     };
   }
 }

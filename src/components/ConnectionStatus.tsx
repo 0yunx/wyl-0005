@@ -1,10 +1,14 @@
 import type { ConnectionStatus as ConnectionStatusType, PeerInfo } from '@/types';
 
+type TransportType = 'broadcast' | 'storage' | 'none';
+
 interface ConnectionStatusProps {
   status: ConnectionStatusType;
   peers: PeerInfo[];
   latency: number;
   version: number;
+  transport: TransportType;
+  origin: string;
 }
 
 const statusConfig: Record<ConnectionStatusType, { label: string; color: string; bgColor: string }> = {
@@ -25,12 +29,18 @@ const statusConfig: Record<ConnectionStatusType, { label: string; color: string;
   },
 };
 
-export function ConnectionStatus({ status, peers, latency, version }: ConnectionStatusProps) {
+const transportLabels: Record<TransportType, string> = {
+  broadcast: 'BroadcastChannel',
+  storage: 'LocalStorage',
+  none: '无',
+};
+
+export function ConnectionStatus({ status, peers, latency, version, transport, origin }: ConnectionStatusProps) {
   const config = statusConfig[status];
   const peerCount = peers.length;
 
   return (
-    <div className="flex items-center gap-3 text-xs">
+    <div className="flex items-center gap-3 text-xs" title={`Origin: ${origin} | Transport: ${transportLabels[transport]}`}>
       <div className="flex items-center gap-1.5">
         <div className="relative">
           <div className={`w-2 h-2 rounded-full ${config.bgColor}`} />
@@ -55,6 +65,10 @@ export function ConnectionStatus({ status, peers, latency, version }: Connection
             {latency}ms
           </span>
           <span className="text-muted-foreground/50">|</span>
+          <span className="px-1.5 py-0.5 rounded bg-secondary text-secondary-foreground">
+            {transportLabels[transport]}
+          </span>
+          <span className="text-muted-foreground/50">|</span>
           <span>v{version}</span>
         </div>
       )}
@@ -66,6 +80,18 @@ export function ConnectionStatus({ status, peers, latency, version }: Connection
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
           </svg>
           正在同步状态...
+        </div>
+      )}
+
+      {status === 'disconnected' && peerCount === 0 && (
+        <div className="flex items-center gap-1.5 text-muted-foreground">
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>请确保多端使用相同的 origin 访问</span>
+          <span className="px-1.5 py-0.5 rounded bg-muted font-mono text-[10px]">
+            {origin || 'unknown'}
+          </span>
         </div>
       )}
     </div>

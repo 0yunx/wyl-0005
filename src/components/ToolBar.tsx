@@ -1,6 +1,8 @@
 import { ConnectionStatus } from './ConnectionStatus';
 import type { ConnectionStatus as ConnectionStatusType, PeerInfo } from '@/types';
 
+type TransportType = 'broadcast' | 'storage' | 'none';
+
 interface ToolbarProps {
   canUndo: boolean;
   canRedo: boolean;
@@ -12,6 +14,8 @@ interface ToolbarProps {
   peers: PeerInfo[];
   syncLatency: number;
   syncVersion: number;
+  syncTransport: TransportType;
+  syncOrigin: string;
 }
 
 export function Toolbar({
@@ -25,6 +29,8 @@ export function Toolbar({
   peers,
   syncLatency,
   syncVersion,
+  syncTransport,
+  syncOrigin,
 }: ToolbarProps) {
   return (
     <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-card">
@@ -46,6 +52,8 @@ export function Toolbar({
             peers={peers}
             latency={syncLatency}
             version={syncVersion}
+            transport={syncTransport}
+            origin={syncOrigin}
           />
         </div>
       </div>

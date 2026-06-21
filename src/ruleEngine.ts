@@ -23,7 +23,7 @@ const COLOR_KEYWORDS: Record<string, ColorType> = {
   '紫色': 'purple', '紫': 'purple', 'purple': 'purple',
   '橙色': 'orange', '橙': 'orange', 'orange': 'orange',
   '粉色': 'pink', '粉': 'pink', 'pink': 'pink',
-  '灰色': 'gray', '灰': 'gray', 'gray': 'grey',
+  '灰色': 'gray', '灰': 'gray', 'gray': 'gray', 'grey': 'gray',
 };
 
 const SHAPE_KEYWORDS: Record<string, ShapeType> = {

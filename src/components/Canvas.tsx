@@ -1,71 +1,192 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useImperativeHandle, forwardRef, useCallback } from 'react';
 import type { Shape, Point } from '@/types';
 
 interface CanvasProps {
   shapes: Shape[];
-  width?: number;
-  height?: number;
+  logicalWidth?: number;
+  logicalHeight?: number;
 }
 
-export function Canvas({ shapes, width = 800, height = 600 }: CanvasProps) {
+export interface CanvasRef {
+  getLogicalDimensions: () => { width: number; height: number };
+  getScale: () => { scaleX: number; scaleY: number };
+}
+
+function getLineScale(ctx: CanvasRenderingContext2D): number {
+  return Math.max(ctx.getTransform().a, 1);
+}
+
+export const Canvas = forwardRef<CanvasRef, CanvasProps>(function Canvas(
+  { shapes, logicalWidth = 800, logicalHeight = 600 },
+  ref
+) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const renderedShapeIdsRef = useRef<Set<string>>(new Set());
+  const cssSizeRef = useRef({ width: 0, height: 0 });
+  const dprRef = useRef(1);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  useImperativeHandle(ref, () => ({
+    getLogicalDimensions: () => ({ width: logicalWidth, height: logicalHeight }),
+    getScale: () => {
+      const { width, height } = cssSizeRef.current;
+      return {
+        scaleX: width > 0 ? width / logicalWidth : 1,
+        scaleY: height > 0 ? height / logicalHeight : 1,
+      };
+    },
+  }));
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  const setupContext = useCallback((ctx: CanvasRenderingContext2D) => {
+    const dpr = dprRef.current;
+    const { width: cssW, height: cssH } = cssSizeRef.current;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const scaleX = cssW > 0 ? cssW / logicalWidth : 1;
+    const scaleY = cssH > 0 ? cssH / logicalHeight : 1;
+    ctx.scale(scaleX, scaleY);
+  }, [logicalWidth, logicalHeight]);
 
-    ctx.clearRect(0, 0, width, height);
-
+  const drawBackground = useCallback((ctx: CanvasRenderingContext2D) => {
     ctx.fillStyle = '#fafafa';
-    ctx.fillRect(0, 0, width, height);
+    ctx.fillRect(0, 0, logicalWidth, logicalHeight);
 
+    const lineScale = getLineScale(ctx);
     ctx.strokeStyle = '#e5e5e5';
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1 / lineScale;
     const gridSize = 40;
-    for (let x = 0; x <= width; x += gridSize) {
+    for (let x = 0; x <= logicalWidth; x += gridSize) {
       ctx.beginPath();
       ctx.moveTo(x, 0);
-      ctx.lineTo(x, height);
+      ctx.lineTo(x, logicalHeight);
       ctx.stroke();
     }
-    for (let y = 0; y <= height; y += gridSize) {
+    for (let y = 0; y <= logicalHeight; y += gridSize) {
       ctx.beginPath();
       ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
+      ctx.lineTo(logicalWidth, y);
       ctx.stroke();
     }
 
     ctx.strokeStyle = '#d4d4d4';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(0, 0, width, height);
+    ctx.lineWidth = 2 / lineScale;
+    ctx.strokeRect(0, 0, logicalWidth, logicalHeight);
+  }, [logicalWidth, logicalHeight]);
 
-    for (const shape of shapes) {
+  const fullRedraw = useCallback((ctx: CanvasRenderingContext2D, currentShapes: Shape[]) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+
+    setupContext(ctx);
+    drawBackground(ctx);
+
+    for (const shape of currentShapes) {
       drawShape(ctx, shape);
     }
-  }, [shapes, width, height]);
+
+    renderedShapeIdsRef.current = new Set(currentShapes.map((s) => s.id));
+  }, [setupContext, drawBackground]);
+
+  const drawIncremental = useCallback((ctx: CanvasRenderingContext2D, newShapes: Shape[]) => {
+    setupContext(ctx);
+    for (const shape of newShapes) {
+      drawShape(ctx, shape);
+      renderedShapeIdsRef.current.add(shape.id);
+    }
+  }, [setupContext]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const handleResize = () => {
+      const containerRect = container.getBoundingClientRect();
+      const padding = 16;
+      const availW = containerRect.width - padding * 2;
+      const availH = containerRect.height - padding * 2;
+      const aspect = logicalWidth / logicalHeight;
+
+      let cssW = availW;
+      let cssH = cssW / aspect;
+      if (cssH > availH) {
+        cssH = availH;
+        cssW = cssH * aspect;
+      }
+
+      cssW = Math.max(1, Math.floor(cssW));
+      cssH = Math.max(1, Math.floor(cssH));
+
+      const dpr = window.devicePixelRatio || 1;
+      dprRef.current = dpr;
+      cssSizeRef.current = { width: cssW, height: cssH };
+
+      canvas.style.width = `${cssW}px`;
+      canvas.style.height = `${cssH}px`;
+      canvas.width = cssW * dpr;
+      canvas.height = cssH * dpr;
+
+      renderedShapeIdsRef.current.clear();
+      fullRedraw(ctx, shapes);
+    };
+
+    handleResize();
+
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(container);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [logicalWidth, logicalHeight, fullRedraw, shapes]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const currentIds = new Set(shapes.map((s) => s.id));
+    const rendered = renderedShapeIdsRef.current;
+
+    const allExistingRendered = shapes.every((s) => rendered.has(s.id));
+    const noRemoved = [...rendered].every((id) => currentIds.has(id));
+    const isIncremental = allExistingRendered && noRemoved && shapes.length > rendered.size;
+
+    if (isIncremental) {
+      const newShapes = shapes.filter((s) => !rendered.has(s.id));
+      drawIncremental(ctx, newShapes);
+    } else if (
+      shapes.length !== rendered.size ||
+      ![...rendered].every((id) => currentIds.has(id))
+    ) {
+      fullRedraw(ctx, shapes);
+    }
+  }, [shapes, drawIncremental, fullRedraw]);
 
   return (
-    <div ref={containerRef} className="flex items-center justify-center p-4 h-full">
+    <div ref={containerRef} className="flex items-center justify-center p-4 h-full w-full">
       <canvas
         ref={canvasRef}
-        width={width}
-        height={height}
         className="rounded-lg shadow-xl bg-white"
-        style={{ maxWidth: '100%', maxHeight: '100%' }}
       />
     </div>
   );
-}
+});
 
 function drawShape(ctx: CanvasRenderingContext2D, shape: Shape) {
   ctx.save();
   ctx.fillStyle = shape.color;
   ctx.strokeStyle = shape.color;
-  ctx.lineWidth = shape.strokeWidth || 2;
+  const lineScale = getLineScale(ctx);
+  ctx.lineWidth = (shape.strokeWidth || 2) / lineScale;
 
   switch (shape.type) {
     case 'circle':
@@ -136,7 +257,8 @@ function drawShape(ctx: CanvasRenderingContext2D, shape: Shape) {
     case 'text':
       if (shape.points && shape.points.length > 0 && shape.text) {
         const p = shape.points[0];
-        ctx.font = 'bold 24px system-ui, sans-serif';
+        const fontSize = 24 / lineScale;
+        ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = shape.color;
@@ -165,7 +287,9 @@ function drawShape(ctx: CanvasRenderingContext2D, shape: Shape) {
 function drawPointLabel(ctx: CanvasRenderingContext2D, p: Point) {
   if (p.label) {
     ctx.save();
-    ctx.font = 'bold 14px system-ui, sans-serif';
+    const lineScale = getLineScale(ctx);
+    const fontSize = 14 / lineScale;
+    ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
     ctx.fillStyle = '#000';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -173,7 +297,10 @@ function drawPointLabel(ctx: CanvasRenderingContext2D, p: Point) {
     const labelY = p.y - 25;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
     const metrics = ctx.measureText(p.label);
-    ctx.fillRect(labelX - metrics.width / 2 - 4, labelY - 8, metrics.width + 8, 18);
+    const padding = 4 / lineScale;
+    const boxW = metrics.width + padding * 2;
+    const boxH = 18 / lineScale;
+    ctx.fillRect(labelX - boxW / 2, labelY - boxH / 2, boxW, boxH);
     ctx.fillStyle = '#000';
     ctx.fillText(p.label, labelX, labelY);
     ctx.restore();
@@ -181,7 +308,8 @@ function drawPointLabel(ctx: CanvasRenderingContext2D, p: Point) {
 }
 
 function drawArrowHead(ctx: CanvasRenderingContext2D, from: Point, to: Point) {
-  const headLength = 12;
+  const lineScale = getLineScale(ctx);
+  const headLength = 12 / lineScale;
   const angle = Math.atan2(to.y - from.y, to.x - from.x);
   ctx.beginPath();
   ctx.moveTo(to.x, to.y);

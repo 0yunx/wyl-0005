@@ -104,8 +104,8 @@ function App() {
         <div className="flex-1 bg-muted/30 flex items-center justify-center">
           <Canvas
             shapes={allShapes}
-            width={CANVAS_WIDTH}
-            height={CANVAS_HEIGHT}
+            logicalWidth={CANVAS_WIDTH}
+            logicalHeight={CANVAS_HEIGHT}
           />
         </div>
       </div>

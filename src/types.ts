@@ -53,3 +53,84 @@ export interface HistoryState {
   present: Command[];
   future: Command[];
 }
+
+export type ConnectionStatus = 'connected' | 'disconnected' | 'syncing';
+
+export type SyncMessageType =
+  | 'command-add'
+  | 'undo'
+  | 'redo'
+  | 'clear'
+  | 'rollback'
+  | 'state-request'
+  | 'state-sync'
+  | 'heartbeat'
+  | 'hello';
+
+export interface SyncMessageBase {
+  type: SyncMessageType;
+  senderId: string;
+  version: number;
+  timestamp: number;
+}
+
+export interface CommandAddMessage extends SyncMessageBase {
+  type: 'command-add';
+  command: Command;
+  newCurrentIndex: number;
+}
+
+export interface UndoMessage extends SyncMessageBase {
+  type: 'undo';
+  newCurrentIndex: number;
+}
+
+export interface RedoMessage extends SyncMessageBase {
+  type: 'redo';
+  newCurrentIndex: number;
+}
+
+export interface ClearMessage extends SyncMessageBase {
+  type: 'clear';
+}
+
+export interface RollbackMessage extends SyncMessageBase {
+  type: 'rollback';
+  newCurrentIndex: number;
+}
+
+export interface StateRequestMessage extends SyncMessageBase {
+  type: 'state-request';
+  requesterId: string;
+}
+
+export interface StateSyncMessage extends SyncMessageBase {
+  type: 'state-sync';
+  targetId: string;
+  commands: Command[];
+  currentIndex: number;
+}
+
+export interface HeartbeatMessage extends SyncMessageBase {
+  type: 'heartbeat';
+}
+
+export interface HelloMessage extends SyncMessageBase {
+  type: 'hello';
+}
+
+export type SyncMessage =
+  | CommandAddMessage
+  | UndoMessage
+  | RedoMessage
+  | ClearMessage
+  | RollbackMessage
+  | StateRequestMessage
+  | StateSyncMessage
+  | HeartbeatMessage
+  | HelloMessage;
+
+export interface PeerInfo {
+  id: string;
+  lastSeen: number;
+}

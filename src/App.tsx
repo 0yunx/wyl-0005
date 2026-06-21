@@ -1,11 +1,12 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Canvas } from '@/components/Canvas';
 import { CommandInput } from '@/components/CommandInput';
 import { HistoryList } from '@/components/HistoryList';
 import { Toolbar } from '@/components/Toolbar';
 import { parseCommand } from '@/ruleEngine';
 import { generateShapes, createCommand, collectAllPoints } from '@/shapeGenerator';
-import type { Command, Shape } from '@/types';
+import { CollaborationManager } from '@/collaboration';
+import type { Command, Shape, ConnectionStatus, PeerInfo } from '@/types';
 
 const CANVAS_WIDTH = 800;
 const CANVAS_HEIGHT = 600;
@@ -14,11 +15,89 @@ function App() {
   const [commands, setCommands] = useState<Command[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
+  const [peers, setPeers] = useState<PeerInfo[]>([]);
+  const [syncLatency, setSyncLatency] = useState(0);
+  const [syncVersion, setSyncVersion] = useState(0);
+
+  const collabManagerRef = useRef<CollaborationManager | null>(null);
+  const commandsRef = useRef<Command[]>([]);
+  const currentIndexRef = useRef(-1);
+
+  commandsRef.current = commands;
+  currentIndexRef.current = currentIndex;
 
   const activeCommands = currentIndex >= 0 ? commands.slice(0, currentIndex + 1) : [];
   const allShapes: Shape[] = activeCommands.flatMap((cmd) => cmd.shapes);
   const canUndo = currentIndex >= 0;
   const canRedo = currentIndex < commands.length - 1;
+
+  useEffect(() => {
+    const manager = new CollaborationManager({
+      onCommandAdd: (command: Command, newCurrentIndex: number, remote: boolean) => {
+        if (remote) {
+          setCommands((prev) => {
+            const active = currentIndexRef.current >= 0 ? prev.slice(0, currentIndexRef.current + 1) : [];
+            const newCommands = active.concat(command);
+            commandsRef.current = newCommands;
+            return newCommands;
+          });
+          setCurrentIndex(newCurrentIndex);
+          currentIndexRef.current = newCurrentIndex;
+        }
+      },
+      onUndo: (newCurrentIndex: number, remote: boolean) => {
+        if (remote) {
+          setCurrentIndex(newCurrentIndex);
+          currentIndexRef.current = newCurrentIndex;
+        }
+      },
+      onRedo: (newCurrentIndex: number, remote: boolean) => {
+        if (remote) {
+          setCurrentIndex(newCurrentIndex);
+          currentIndexRef.current = newCurrentIndex;
+        }
+      },
+      onClear: (remote: boolean) => {
+        if (remote) {
+          setCommands([]);
+          setCurrentIndex(-1);
+          commandsRef.current = [];
+          currentIndexRef.current = -1;
+        }
+      },
+      onRollback: (newCurrentIndex: number, remote: boolean) => {
+        if (remote) {
+          setCurrentIndex(newCurrentIndex);
+          currentIndexRef.current = newCurrentIndex;
+        }
+      },
+      onStateSync: (syncedCommands: Command[], syncedCurrentIndex: number) => {
+        setCommands(syncedCommands);
+        setCurrentIndex(syncedCurrentIndex);
+        commandsRef.current = syncedCommands;
+        currentIndexRef.current = syncedCurrentIndex;
+      },
+      onStateChange: (state) => {
+        setConnectionStatus(state.connectionStatus);
+        setPeers(state.peers);
+        setSyncLatency(state.syncLatency);
+        setSyncVersion(state.version);
+      },
+      getState: () => ({
+        commands: commandsRef.current,
+        currentIndex: currentIndexRef.current,
+      }),
+    });
+
+    collabManagerRef.current = manager;
+    manager.connect();
+
+    return () => {
+      manager.disconnect();
+      collabManagerRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -40,8 +119,12 @@ function App() {
 
     await new Promise((resolve) => setTimeout(resolve, 300));
 
+    const activeCmds = currentIndexRef.current >= 0
+      ? commandsRef.current.slice(0, currentIndexRef.current + 1)
+      : [];
+
     const parsed = parseCommand(rawText);
-    const existingPoints = collectAllPoints(activeCommands);
+    const existingPoints = collectAllPoints(activeCmds);
 
     const { shapes } = generateShapes(parsed, {
       canvasDimensions: { width: CANVAS_WIDTH, height: CANVAS_HEIGHT },
@@ -50,37 +133,53 @@ function App() {
 
     if (shapes.length > 0) {
       const newCommand = createCommand(rawText, parsed, shapes);
-      const newCommands = activeCommands.concat(newCommand);
+      const newCommands = activeCmds.concat(newCommand);
+      const newIndex = newCommands.length - 1;
 
       setCommands(newCommands);
-      setCurrentIndex(newCommands.length - 1);
+      setCurrentIndex(newIndex);
+      commandsRef.current = newCommands;
+      currentIndexRef.current = newIndex;
+
+      collabManagerRef.current?.sendCommandAdd(newCommand, newIndex);
     }
 
     setIsProcessing(false);
-  }, [activeCommands]);
+  }, []);
 
   const handleUndo = useCallback(() => {
     if (canUndo) {
-      setCurrentIndex((prev) => prev - 1);
+      const newIndex = currentIndexRef.current - 1;
+      setCurrentIndex(newIndex);
+      currentIndexRef.current = newIndex;
+      collabManagerRef.current?.sendUndo(newIndex);
     }
   }, [canUndo]);
 
   const handleRedo = useCallback(() => {
     if (canRedo) {
-      setCurrentIndex((prev) => prev + 1);
+      const newIndex = currentIndexRef.current + 1;
+      setCurrentIndex(newIndex);
+      currentIndexRef.current = newIndex;
+      collabManagerRef.current?.sendRedo(newIndex);
     }
   }, [canRedo]);
 
   const handleClear = useCallback(() => {
     setCommands([]);
     setCurrentIndex(-1);
+    commandsRef.current = [];
+    currentIndexRef.current = -1;
+    collabManagerRef.current?.sendClear();
   }, []);
 
   const handleRollback = useCallback((index: number) => {
-    if (index >= -1 && index < commands.length) {
+    if (index >= -1 && index < commandsRef.current.length) {
       setCurrentIndex(index);
+      currentIndexRef.current = index;
+      collabManagerRef.current?.sendRollback(index);
     }
-  }, [commands.length]);
+  }, []);
 
   return (
     <div className="flex flex-col h-screen bg-background">
@@ -91,6 +190,10 @@ function App() {
         onRedo={handleRedo}
         onClear={handleClear}
         commandCount={activeCommands.length}
+        connectionStatus={connectionStatus}
+        peers={peers}
+        syncLatency={syncLatency}
+        syncVersion={syncVersion}
       />
       <div className="flex flex-1 overflow-hidden">
         <div className="w-80 border-r border-border flex flex-col bg-card">
